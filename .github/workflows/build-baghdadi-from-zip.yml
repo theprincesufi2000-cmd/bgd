@@ -5,6 +5,7 @@ on:
   push:
     paths:
       - 'Baghdadi*.zip'
+      - 'Baghdadi*.zip.part-*'
       - '.github/workflows/build-baghdadi-from-zip.yml'
 
 permissions:
@@ -42,7 +43,7 @@ jobs:
             'platforms;android-35' \
             'build-tools;35.0.0'
 
-      - name: Extract project ZIP
+      - name: Join parts and extract project ZIP
         id: source
         shell: bash
         run: |
@@ -52,21 +53,37 @@ jobs:
             find "$GITHUB_WORKSPACE" -maxdepth 2 -type f \
               -iname 'Baghdadi*.zip' -print | sort
           )
-
-          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-            echo 'لم يتم العثور على ملف Baghdadi*.zip في المستودع.' >&2
-            exit 1
-          fi
+          mapfile -t ZIP_PARTS < <(
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f \
+              -iname 'Baghdadi*.zip.part-*' -print | sort -V
+          )
 
           if [ "${#ZIP_FILES[@]}" -gt 1 ]; then
-            echo 'يوجد أكثر من ملف Baghdadi ZIP. اترك نسخة واحدة فقط:' >&2
-            printf ' - %s\n' "${ZIP_FILES[@]}" >&2
+            echo 'يوجد أكثر من ملف Baghdadi ZIP كامل. اترك نسخة واحدة فقط.' >&2
             exit 1
           fi
+
+          if [ "${#ZIP_FILES[@]}" -eq 1 ] && [ "${#ZIP_PARTS[@]}" -gt 0 ]; then
+            echo 'وجدت ملف ZIP كاملًا وأجزاءً مقسمة معًا. استخدم أحد الخيارين فقط.' >&2
+            exit 1
+          fi
+
+          if [ "${#ZIP_FILES[@]}" -eq 1 ]; then
+            ZIP_FILE="${ZIP_FILES[0]}"
+          elif [ "${#ZIP_PARTS[@]}" -ge 2 ]; then
+            ZIP_FILE="$RUNNER_TEMP/Baghdadi-project.zip"
+            cat "${ZIP_PARTS[@]}" > "$ZIP_FILE"
+            echo "تم جمع ${#ZIP_PARTS[@]} أجزاء في ملف ZIP واحد."
+          else
+            echo 'ارفع ملف Baghdadi*.zip كاملًا، أو جميع ملفات Baghdadi*.zip.part-*.' >&2
+            exit 1
+          fi
+
+          unzip -tq "$ZIP_FILE"
 
           EXTRACT_DIR="$RUNNER_TEMP/baghdadi-source"
           mkdir -p "$EXTRACT_DIR"
-          unzip -q "${ZIP_FILES[0]}" -d "$EXTRACT_DIR"
+          unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
 
           GRADLEW_FILE="$(find "$EXTRACT_DIR" -type f -name gradlew -print -quit)"
           if [ -z "$GRADLEW_FILE" ]; then
@@ -171,4 +188,4 @@ jobs:
           name: ${{ steps.apk.outputs.artifact_name }}
           path: ${{ steps.apk.outputs.apk_path }}
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
