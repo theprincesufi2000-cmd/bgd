@@ -1,4 +1,4 @@
-name: Build Baghdadi from ZIP
+name: Build Baghdadi v2.5.0 from ZIP
 
 on:
   workflow_dispatch:
@@ -71,6 +71,13 @@ jobs:
           if [ "${#ZIP_FILES[@]}" -eq 1 ]; then
             ZIP_FILE="${ZIP_FILES[0]}"
           elif [ "${#ZIP_PARTS[@]}" -ge 2 ]; then
+            PART_BASE="${ZIP_PARTS[0]%.part-*}"
+            for PART in "${ZIP_PARTS[@]}"; do
+              if [ "${PART%.part-*}" != "$PART_BASE" ]; then
+                echo 'وجدت أجزاءً تابعة لأكثر من حزمة. احذف أجزاء الإصدارات القديمة.' >&2
+                exit 1
+              fi
+            done
             ZIP_FILE="$RUNNER_TEMP/Baghdadi-project.zip"
             cat "${ZIP_PARTS[@]}" > "$ZIP_FILE"
             echo "تم جمع ${#ZIP_PARTS[@]} أجزاء في ملف ZIP واحد."
@@ -153,15 +160,15 @@ jobs:
               -PBAGHDADI_KEY_PASSWORD="$KEY_PASSWORD"
 
             SOURCE_APK='app/build/outputs/apk/release/app-release.apk'
-            OUTPUT_NAME='Baghdadi-v2.4.0-release.apk'
-            ARTIFACT_NAME='Baghdadi-v2.4.0-release'
+            OUTPUT_NAME='Baghdadi-v2.5.0-release.apk'
+            ARTIFACT_NAME='Baghdadi-v2.5.0-release'
           else
             echo 'مفاتيح توقيع Release غير مكتملة؛ سيتم بناء نسخة Debug قابلة للتثبيت.'
             ./gradlew --no-daemon --stacktrace clean assembleDebug
 
             SOURCE_APK='app/build/outputs/apk/debug/app-debug.apk'
-            OUTPUT_NAME='Baghdadi-v2.4.0-debug.apk'
-            ARTIFACT_NAME='Baghdadi-v2.4.0-debug'
+            OUTPUT_NAME='Baghdadi-v2.5.0-debug.apk'
+            ARTIFACT_NAME='Baghdadi-v2.5.0-debug'
           fi
 
           if [ ! -s "$SOURCE_APK" ]; then
@@ -188,4 +195,4 @@ jobs:
           name: ${{ steps.apk.outputs.artifact_name }}
           path: ${{ steps.apk.outputs.apk_path }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 14
