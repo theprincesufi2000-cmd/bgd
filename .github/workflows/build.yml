@@ -1,0 +1,236 @@
+name: Build Baghdadi APK from two ZIPs
+
+'on':
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'auto: Release with signing secrets, otherwise Debug'
+        required: true
+        default: auto
+        type: choice
+        options: [auto, release, debug]
+  push:
+    paths:
+      - 'Baghdadi-source-part-001.zip'
+      - 'Baghdadi-source-part-002.zip'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: baghdadi-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUILD_TYPE: ${{ inputs.build_type || 'auto' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify, join and extract the two ZIP files
+        id: source
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import stat
+          import tempfile
+          import zipfile
+          from pathlib import Path, PurePosixPath
+
+          parts = [
+              ('001', 19245126, '092db5b9b3b640051e115f702952b0628f2efd039da0a468dcafc03d2a64b059'),
+              ('002', 19245125, '0c0554c61bc17d3119dd040b1b4fa92d82ea24c73908b70fc723173ea861b1d3'),
+          ]
+          expected_sha = '562221a5c1a2dd7f7d1bef8db81654cd6021975b96ea63d04709524097b368c8'
+          repo = Path(os.environ['GITHUB_WORKSPACE'])
+          work = Path(tempfile.mkdtemp(prefix='baghdadi-source-', dir=os.environ['RUNNER_TEMP']))
+          archive = work / 'source.zip'
+          joined_hash = hashlib.sha256()
+          with archive.open('wb') as joined:
+              for number, expected_size, expected_part_sha in parts:
+                  wrapper = repo / ('Baghdadi-source-part-' + number + '.zip')
+                  if not wrapper.is_file():
+                      raise SystemExit('Missing ' + wrapper.name + ': upload BOTH ZIP files to the repository root without extracting or renaming them.')
+                  with zipfile.ZipFile(wrapper) as outer:
+                      entries = [i for i in outer.infolist() if not i.is_dir()]
+                      if len(entries) != 1 or entries[0].filename != 'Baghdadi-source.zip.part-' + number:
+                          raise SystemExit('Unexpected contents in ' + wrapper.name)
+                      if entries[0].file_size != expected_size:
+                          raise SystemExit('Incomplete or incorrect part: ' + wrapper.name)
+                      part_hash = hashlib.sha256()
+                      total = 0
+                      with outer.open(entries[0]) as part:
+                          while True:
+                              chunk = part.read(1024 * 1024)
+                              if not chunk:
+                                  break
+                              total += len(chunk)
+                              part_hash.update(chunk)
+                              joined_hash.update(chunk)
+                              joined.write(chunk)
+                      if total != expected_size or part_hash.hexdigest() != expected_part_sha:
+                          raise SystemExit('SHA-256 mismatch in ' + wrapper.name + '; download and upload that part again.')
+          if archive.stat().st_size != 38490251 or joined_hash.hexdigest() != expected_sha:
+              raise SystemExit('The reconstructed source ZIP does not match the original.')
+          destination = work / 'project'
+          destination.mkdir()
+          with zipfile.ZipFile(archive) as source:
+              total_size = 0
+              paths = set()
+              for entry in source.infolist():
+                  name = PurePosixPath(entry.filename)
+                  if name.is_absolute() or '..' in name.parts or '\\' in entry.filename:
+                      raise SystemExit('Unsafe path in source ZIP')
+                  if name in paths or stat.S_ISLNK(entry.external_attr >> 16):
+                      raise SystemExit('Duplicate path or symbolic link in source ZIP')
+                  paths.add(name)
+                  total_size += entry.file_size
+                  if total_size > 1024 * 1024 * 1024:
+                      raise SystemExit('Unexpected source archive size')
+              bad = source.testzip()
+              if bad:
+                  raise SystemExit('Damaged source ZIP entry: ' + bad)
+              source.extractall(destination)
+          projects = [p.parent for p in destination.rglob('gradlew') if (p.parent / 'app/build.gradle').is_file()]
+          if len(projects) != 1:
+              raise SystemExit('Expected exactly one Android Gradle project; found ' + str(len(projects)))
+          project = projects[0]
+          for required in ('gradle/wrapper/gradle-wrapper.jar', 'gradle/wrapper/gradle-wrapper.properties', 'app/src/main/AndroidManifest.xml'):
+              if not (project / required).is_file():
+                  raise SystemExit('Missing required project file: ' + required)
+          (project / 'gradlew').chmod(0o755)
+          output = Path(os.environ['RUNNER_TEMP']) / 'baghdadi-apk-output'
+          output.mkdir(exist_ok=True)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
+              print('project_dir=' + str(project), file=f)
+              print('output_dir=' + str(output), file=f)
+          print('Source restored byte-for-byte. SHA-256: ' + expected_sha)
+          print('Project: ' + str(project))
+          print('The build keeps the version number and features present in the original source.')
+          PY
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install the exact Android build tools
+        run: |
+          set -euo pipefail
+          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+          test -s "$ANDROID_HOME/platforms/android-36/android.jar"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+
+      - name: Set up Gradle 8.11.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+          cache-disabled: true
+
+      - name: Build APK and verify its signature
+        id: apk
+        env:
+          PROJECT_DIR: ${{ steps.source.outputs.project_dir }}
+          OUTPUT_DIR: ${{ steps.source.outputs.output_dir }}
+          KEYSTORE_BASE64: ${{ secrets.BAGHDADI_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.BAGHDADI_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.BAGHDADI_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.BAGHDADI_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          umask 077
+          count=0
+          for name in KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD; do
+            if [[ -n "${!name}" ]]; then count=$((count + 1)); fi
+          done
+          variant="$BUILD_TYPE"
+          if [[ "$variant" == auto ]]; then
+            if [[ "$count" == 4 ]]; then
+              variant=release
+            elif [[ "$count" == 0 ]]; then
+              variant=debug
+              echo '::warning::No signing secrets: producing a Debug APK for testing, NOT a signed Release upgrade.'
+            else
+              echo '::error::Signing is partially configured. Add all four BAGHDADI_* signing secrets, or explicitly select debug.'
+              exit 1
+            fi
+          fi
+          if [[ "$variant" == release ]]; then
+            if [[ "$count" != 4 ]]; then
+              echo '::error::Release requires BAGHDADI_KEYSTORE_BASE64, BAGHDADI_STORE_PASSWORD, BAGHDADI_KEY_ALIAS and BAGHDADI_KEY_PASSWORD.'
+              exit 1
+            fi
+            signing_dir="$(mktemp -d "$RUNNER_TEMP/baghdadi-signing.XXXXXX")"
+            export ORG_GRADLE_PROJECT_BAGHDADI_STORE_FILE="$signing_dir/release.jks"
+            trap 'rm -f -- "$ORG_GRADLE_PROJECT_BAGHDADI_STORE_FILE"; rmdir -- "$signing_dir"' EXIT
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$ORG_GRADLE_PROJECT_BAGHDADI_STORE_FILE"
+            test -s "$ORG_GRADLE_PROJECT_BAGHDADI_STORE_FILE"
+            export ORG_GRADLE_PROJECT_BAGHDADI_STORE_PASSWORD="$STORE_PASSWORD"
+            export ORG_GRADLE_PROJECT_BAGHDADI_KEY_ALIAS="$KEY_ALIAS"
+            export ORG_GRADLE_PROJECT_BAGHDADI_KEY_PASSWORD="$KEY_PASSWORD"
+            gradle_task=:app:assembleRelease
+          elif [[ "$variant" == debug ]]; then
+            gradle_task=:app:assembleDebug
+          else
+            echo '::error::Unknown build_type.'
+            exit 1
+          fi
+          unset KEYSTORE_BASE64 STORE_PASSWORD KEY_ALIAS KEY_PASSWORD
+          cd "$PROJECT_DIR"
+          # Uses the pinned Gradle installation: no second wrapper download.
+          gradle --version
+          gradle --no-daemon --console=plain --stacktrace --max-workers=2 "$gradle_task"
+          apk="app/build/outputs/apk/$variant/app-$variant.apk"
+          test -s "$apk"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$apk" | tee "$OUTPUT_DIR/signature-info.txt"
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging "$apk" > "$OUTPUT_DIR/apk-info.txt"
+          cp "$apk" "$OUTPUT_DIR/Baghdadi-$variant.apk"
+          (
+            cd "$OUTPUT_DIR"
+            sha256sum "Baghdadi-$variant.apk" > SHA256SUMS.txt
+          )
+          printf 'artifact_name=Baghdadi-%s-apk\n' "$variant" >> "$GITHUB_OUTPUT"
+          {
+            printf '### Baghdadi APK\n\n'
+            printf 'Build type: **%s**. Download the APK ZIP from **Artifacts** below.\n\n' "$variant"
+            printf 'The source is unchanged: its internal application version is 2.8.1, despite the staged archive filename.\n\n'
+            if [[ "$variant" == debug ]]; then
+              printf '**Debug only:** it uses a different certificate from Release. Google sign-in requires registering the matching SHA fingerprints.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK, certificate details and checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.artifact_name }}
+          path: ${{ steps.source.outputs.output_dir }}/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostics if the build failed
+        if: failure() && steps.source.outputs.project_dir != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Baghdadi-build-diagnostics
+          path: |
+            ${{ steps.source.outputs.project_dir }}/app/build/outputs/logs/
+            ${{ steps.source.outputs.project_dir }}/app/build/reports/
+            ${{ steps.source.outputs.project_dir }}/build/reports/
+          if-no-files-found: ignore
+          retention-days: 7
