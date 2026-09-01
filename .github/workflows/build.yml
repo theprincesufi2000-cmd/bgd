@@ -42,13 +42,13 @@ jobs:
           from pathlib import Path, PurePosixPath
 
           wrappers = [
-              ('001', 19254656, '480693949a9d4491c19d8d899c9712816534ef800e9518e3a47d3bdd5bb00e95',
-               19254456, 'c61165899759c6209a6dd6c9bc6c297874e375c670e8517814204e7b28648279'),
-              ('002', 19254655, 'ccd906b52ebb1684cd526cfce42e45c4e5448a0aea288634acd70077a385bcd6',
-               19254455, '1f29c3375a5c91401c0c75895988c2abb1dfe30be44f3123e43dae5f6e2e1394'),
+              ('001', 19246934, 'aea711716736175de0716d687300b9ddd552b9245a6d8bc671e43dd33aaee5fa',
+               19246734, '3bf9e5d3a346fe127ed63eb0596a2bc10cb57c192270619d4e4510ddda50cae2'),
+              ('002', 19246933, 'bdd3e8e144270cce7f7bfa0187a2f242652b9799553417581f2220050d94a4f4',
+               19246733, '4f6336011753f4c6361697eb09506be0be7ea8f0450a7cefbba27325126c87a3'),
           ]
-          source_size = 38508911
-          source_sha = 'b2325155b45fc3bde53c07cf9c471c91721fcc513e25d73556c20c3c35c5bf55'
+          source_size = 38493467
+          source_sha = '55d646fd3ac8eb56d3cb1c633d364ad1ca83ba663ae094016835c9209bcc17ec'
           repo = Path(os.environ['GITHUB_WORKSPACE'])
           temp = Path(tempfile.mkdtemp(prefix='baghdadi-v290-', dir=os.environ['RUNNER_TEMP']))
           archive = temp / 'Baghdadi-v2.9.0-Social-Complete-Source.zip'
